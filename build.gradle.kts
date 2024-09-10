@@ -45,3 +45,7 @@ tasks {
         token.set(System.getenv("PUBLISH_TOKEN"))
     }
 }
+dependencies {
+    implementation("org.jetbrains:markdown:0.7.3")
+
+}

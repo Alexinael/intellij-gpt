@@ -3,16 +3,25 @@ package com.programtom.intellijgpt
 import com.google.gson.Gson
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
+import com.intellij.ui.components.JBScrollPane
+import com.intellij.util.ui.HTMLEditorKitBuilder
 import com.programtom.intellijgpt.models.ChatRequest
 import com.programtom.intellijgpt.models.ChatResponse
 import org.apache.http.HttpStatus
+import org.intellij.markdown.flavours.MarkdownFlavourDescriptor
+import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
+import org.intellij.markdown.html.HtmlGenerator
+import org.intellij.markdown.parser.MarkdownParser
 import java.awt.BorderLayout
+import java.awt.Component
 import java.awt.GridLayout
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URI
 import javax.swing.*
+import javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+import javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
 
 
 private const val model = "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
@@ -24,7 +33,7 @@ class GPTChatWindow {
 
     private var prompt: JTextArea
     private var chat: JButton
-    private var code: JTextArea
+    private var editor: JTextPane
     private var systemPrompt: JTextField
     val content: JPanel
 
@@ -56,9 +65,15 @@ class GPTChatWindow {
 
             os.write(objectMapper.toJson(chatRequest).encodeToByteArray())
             os.flush()
-            val responseCode = connection.getResponseCode();
+
+            val flavour: MarkdownFlavourDescriptor = GFMFlavourDescriptor()
+            val parsedTree = MarkdownParser(flavour)
+
+
+            val responseCode = connection.getResponseCode()
             if (responseCode == HttpStatus.SC_OK) {
 
+                val sb = StringBuilder()
                 BufferedReader(InputStreamReader(connection.inputStream)).use { reader ->
                     var line: String?
                     while (true) {
@@ -76,7 +91,11 @@ class GPTChatWindow {
                             if (chatResponse.choices!!.first().delta?.content != null) {
 
                                 ApplicationManager.getApplication().runReadAction {
-                                    code.text += chatResponse.choices!!.first().delta?.content
+
+                                    sb.append(chatResponse.choices!!.first().delta?.content)
+                                    val tree = parsedTree.buildMarkdownTreeFromString(sb.toString())
+                                    val html = HtmlGenerator(sb.toString(), tree, flavour, false).generateHtml()
+                                    editor.text = html
                                 }
                             }
                         }
@@ -96,11 +115,14 @@ class GPTChatWindow {
             prompt = JTextArea("Could you give me minimal code to create a window inside visual studio code")
             systemPrompt = JTextField("Helpful Coding Assistant")
             systemPrompt.toolTipText = "System Prompt"
-            code = JTextArea()
+            editor = JTextPane()
+            val build = HTMLEditorKitBuilder().build()
+            editor.editorKit = build
             chat = JButton("Ask")
 
             chat.addActionListener {
                 if (prompt.text.isNotEmpty() && systemPrompt.text.isNotEmpty()) {
+                    editor.text = ""
                     sendTextToEndpoint()
                 } else {
                     JOptionPane.showMessageDialog(
@@ -113,16 +135,20 @@ class GPTChatWindow {
             }
             val questionPanel = JPanel(BorderLayout())
             questionPanel.add(JLabel("Chat with GPT"), BorderLayout.NORTH)
-            questionPanel.add(JScrollPane(prompt), BorderLayout.CENTER)
+            questionPanel.add(scrollPane(prompt), BorderLayout.CENTER)
             questionPanel.add(systemPrompt, BorderLayout.SOUTH)
             add(questionPanel)
 
             val answerPanel = JPanel(BorderLayout())
             answerPanel.add(chat, BorderLayout.NORTH)
-            answerPanel.add(JScrollPane(code), BorderLayout.CENTER)
+
+            answerPanel.add(scrollPane(editor), BorderLayout.CENTER)
             add(answerPanel)
-
-
         }
+    }
+
+    private fun scrollPane(code: Component): JBScrollPane {
+        val scroll = JBScrollPane(code, VERTICAL_SCROLLBAR_AS_NEEDED, HORIZONTAL_SCROLLBAR_NEVER)
+        return scroll
     }
 }
