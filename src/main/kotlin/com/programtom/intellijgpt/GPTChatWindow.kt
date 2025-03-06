@@ -1,8 +1,10 @@
 package com.programtom.intellijgpt
 
 import com.google.gson.Gson
+import com.google.gson.JsonObject // ✅ Импорт JsonObject исправлен
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.HTMLEditorKitBuilder
 import com.programtom.intellijgpt.models.ChatRequest
@@ -23,7 +25,9 @@ import javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
 import javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
 
 
-private const val model = "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+//private const val model = "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+private const val model =
+    "qwen2.5-7b-instruct-1m" //""lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 private const val server: String = "localhost"
 
 private const val JUMP_SCROLL_SKIPS = 70
@@ -37,10 +41,31 @@ class GPTChatWindow {
     private var editor: JTextPane
     private var systemPrompt: JTextField
     private var scrollPane: JBScrollPane
+
+    private lateinit var modelSelector: JComboBox<String> // ✅ Используем lateinit, чтобы избежать проблем инициализации
     val content: JPanel
 //    val map = HashMap<String, String>()
 
     private fun sendTextToEndpoint() {
+        var currentFileName = "Unknown File"
+
+        SwingUtilities.invokeLater { // ✅ Оборачиваем в UI-тред
+//            val project = ApplicationManager.getApplication().currentProject ?: return@invokeLater
+//            val project = FileEditorManager.getInstance(null)?.project ?: return@invokeLater
+            val project = com.intellij.openapi.project.ProjectManager.getInstance().openProjects.firstOrNull()
+                ?: return@invokeLater
+
+            val editorManager = FileEditorManager.getInstance(project)
+            val files = editorManager.selectedFiles
+
+            if (files.isNotEmpty()) {
+                val file = files[0]
+                val fileType = file.fileType.name
+                currentFileName = file.name
+//                println("Current file type: $fileType")
+            }
+        }
+
         ApplicationManager.getApplication().executeOnPooledThread {
             val objectMapper = Gson()
             val urlStr = "http://$server:1234/v1/chat/completions"
@@ -59,12 +84,14 @@ class GPTChatWindow {
                         ChatRequest.Message(
                             "system",
                             systemPrompt.text
-                        ), ChatRequest.Message("user", prompt.text)
+                        ), ChatRequest.Message("user", "Проект: ${currentFileName}\n\n  ${prompt.text}")
                     )
                     )
             chatRequest.stream = true
             chatRequest.model =
-                model
+//                model
+                modelSelector.selectedItem as String
+
 
             os.write(objectMapper.toJson(chatRequest).encodeToByteArray())
             os.flush()
@@ -125,48 +152,20 @@ class GPTChatWindow {
         return html
     }
 
-//    private fun addCopy(generateHtml: String): String {
-//        map.clear()
-//        val sb = StringBuilder()
-//        val split = generateHtml.split("\n")
-//        val tempCode = StringBuilder()
-//
-//        for (i in 0 until (split.size)) {
-//            if (tempCode.isEmpty()) {
-//                if (split[i].contains("<code")) {
-//                    tempCode.append(split[i].substring(split[i].lastIndexOf(">") + 1)).append("\n")
-//                }
-//            } else {
-//                if (split[i].contains("</code>")) {
-//
-//                    val i1 = split[i].indexOf("</code>") + "</code>".length
-//                    val s = split[i].substring(0, i1) + tempCode.toString() + split[i].substring(i1)
-//
-//                    val time = System.currentTimeMillis().toString()
-//                    map[time] = s
-//                    sb.append("<a href=\"").append(time).append("\">Copy</a>").append("\n")
-//
-//                    tempCode.clear()
-//                    continue
-//                }
-//                if (tempCode.isNotEmpty()) {
-//                    tempCode.append(split[i]).append("\n")
-//                }
-//            }
-//
-//            sb.append(split[i]).append("\n")
-//        }
-//        return sb.toString()
-//    }
 
     init {
         this.content = JPanel().apply {
+            systemPrompt = JTextField("Helpful Coding Assistant")
+            systemPrompt.toolTipText = "System Prompt"
+
+            modelSelector = JComboBox()
+            modelSelector.toolTipText = "Select AI Model"
+            fetchModels() // ✅ Загружаем список моделей из API
 
             layout = GridLayout(2, 1)
             prompt = JTextArea("")
             prompt.lineWrap = true
-            systemPrompt = JTextField("Helpful Coding Assistant")
-            systemPrompt.toolTipText = "System Prompt"
+
             editor = JTextPane()
             val build = HTMLEditorKitBuilder().build()
             editor.editorKit = build
@@ -186,7 +185,7 @@ class GPTChatWindow {
             }
             val questionPanel = JPanel(BorderLayout())
             questionPanel.add(JLabel("Chat with GPT"), BorderLayout.NORTH)
-
+            questionPanel.add(modelSelector, BorderLayout.NORTH)
             questionPanel.add(
                 JBScrollPane(prompt, VERTICAL_SCROLLBAR_AS_NEEDED, HORIZONTAL_SCROLLBAR_NEVER),
                 BorderLayout.CENTER
@@ -202,4 +201,33 @@ class GPTChatWindow {
         }
     }
 
+
+    private fun fetchModels() {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val url = URI.create("http://localhost:1234/v1/models").toURL()
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    val reader = BufferedReader(InputStreamReader(connection.inputStream))
+                    val response = reader.readText()
+                    reader.close()
+
+                    val objectMapper = Gson()
+                    val jsonObject = objectMapper.fromJson(response, JsonObject::class.java)
+                    val models = jsonObject.getAsJsonArray("data")
+                        .mapNotNull { it.asJsonObject["id"]?.asString }
+
+                    SwingUtilities.invokeLater {
+                        modelSelector.removeAllItems()
+                        models.forEach { modelSelector.addItem(it) }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 }

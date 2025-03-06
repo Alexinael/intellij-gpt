@@ -5,7 +5,7 @@
 
     <!-- Public plugin name should be written in Title Case.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
-    <name>GPT Code</name>
+    <name>AI LOCAL ASSIST</name>
 
     <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
     <vendor email="tomavelev@programtom.com" url="https://www.programtom.com/dev">Program Tom LTD</vendor>
@@ -22,7 +22,7 @@
     <!-- Extension points defined by the plugin.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow id="GPT Chat"
+        <toolWindow id="AI-ASSIST"
                     factoryClass="com.programtom.intellijgpt.GptWindowFactory"
                     anchor="right"/>
     </extensions>
