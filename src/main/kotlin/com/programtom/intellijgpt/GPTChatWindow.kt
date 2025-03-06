@@ -1,10 +1,16 @@
 package com.programtom.intellijgpt
 
 import com.google.gson.Gson
-import com.google.gson.JsonObject // ✅ Импорт JsonObject исправлен
+import com.google.gson.JsonObject
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.SelectionModel
+import com.intellij.openapi.editor.actions.PasteAction
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.HTMLEditorKitBuilder
 import com.programtom.intellijgpt.models.ChatRequest
@@ -14,193 +20,114 @@ import org.intellij.markdown.flavours.MarkdownFlavourDescriptor
 import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
 import org.intellij.markdown.html.HtmlGenerator
 import org.intellij.markdown.parser.MarkdownParser
-import java.awt.BorderLayout
-import java.awt.GridLayout
+import java.awt.*
+import java.awt.event.ActionEvent
+import java.awt.event.KeyEvent
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URI
 import javax.swing.*
-import javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
-import javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
 
-
-//private const val model = "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
-private const val model =
-    "qwen2.5-7b-instruct-1m" //""lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 private const val server: String = "localhost"
-
 private const val JUMP_SCROLL_SKIPS = 70
 
 @Service(Service.Level.PROJECT)
 class GPTChatWindow {
+    private fun setupKeyBindings() {
+        val inputMap = prompt.inputMap
+        val actionMap = prompt.actionMap
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, KeyEvent.CTRL_DOWN_MASK), "send")
+        actionMap.put("send", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent) {
+                sendTextToEndpoint()
+            }
+        })
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "clear")
+        actionMap.put("clear", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent) {
+                prompt.text = ""
+            }
+        })
+    }
+    private fun sendTextToEndpoint() {
+        stop.isEnabled = true
+        chat.isEnabled = false
 
+        var currentFileName = "Unknown File"
+        val project = com.intellij.openapi.project.ProjectManager.getInstance().openProjects.firstOrNull()
+            ?: return
+        val editorManager = FileEditorManager.getInstance(project)
+        val files = editorManager.selectedFiles
+        if (files.isNotEmpty()) {
+            currentFileName = files[0].name
+        }
 
+        chatWorker = object : SwingWorker<Void, String>() {
+            override fun doInBackground(): Void? {
+                try {
+                    val objectMapper = Gson()
+                    val urlStr = "http://$server:1234/v1/chat/completions"
+                    val url = URI.create(urlStr).toURL()
+                    val connection = url.openConnection() as HttpURLConnection
+                    connection.requestMethod = "POST"
+                    connection.setRequestProperty("Content-Type", "application/json")
+                    connection.doOutput = true
+                    val os = connection.outputStream
+
+                    val chatRequest = ChatRequest().apply {
+                        messages = listOf(
+                            ChatRequest.Message("system", systemPrompt.text),
+                            ChatRequest.Message("user", "Текущий файл: $currentFileName\n\n${prompt.text}")
+                        )
+                        stream = true
+                        model = modelSelector.selectedItem as String
+                    }
+
+                    os.write(objectMapper.toJson(chatRequest).encodeToByteArray())
+                    os.flush()
+
+                    if (connection.responseCode == HttpStatus.SC_OK) {
+                        val reader = BufferedReader(InputStreamReader(connection.inputStream))
+                        var line: String?
+                        val sb = StringBuilder()
+                        while (reader.readLine().also { line = it } != null) {
+                            if (line!!.contains("[DONE]")) break
+                            val chatResponse = objectMapper.fromJson(line!!.replace("data: ", ""), ChatResponse::class.java)
+                            chatResponse?.choices?.firstOrNull()?.delta?.content?.let {
+                                sb.append(it)
+                                publish(sb.toString())
+                            }
+                        }
+                        reader.close()
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+                return null
+            }
+
+            override fun process(chunks: List<String>) {
+                editor.text = chunks.last()
+                scrollPane.verticalScrollBar.value = scrollPane.verticalScrollBar.maximum
+            }
+
+            override fun done() {
+                stop.isEnabled = false
+                chat.isEnabled = true
+            }
+        }
+        chatWorker?.execute()
+    }
     private var prompt: JTextArea
     private var chat: JButton
+    private var stop: JButton
     private var editor: JTextPane
     private var systemPrompt: JTextField
     private var scrollPane: JBScrollPane
-
-    private lateinit var modelSelector: JComboBox<String> // ✅ Используем lateinit, чтобы избежать проблем инициализации
+    private lateinit var modelSelector: JComboBox<String>
+    private var chatWorker: SwingWorker<Void, String>? = null
     val content: JPanel
-//    val map = HashMap<String, String>()
-
-    private fun sendTextToEndpoint() {
-        var currentFileName = "Unknown File"
-
-        SwingUtilities.invokeLater { // ✅ Оборачиваем в UI-тред
-//            val project = ApplicationManager.getApplication().currentProject ?: return@invokeLater
-//            val project = FileEditorManager.getInstance(null)?.project ?: return@invokeLater
-            val project = com.intellij.openapi.project.ProjectManager.getInstance().openProjects.firstOrNull()
-                ?: return@invokeLater
-
-            val editorManager = FileEditorManager.getInstance(project)
-            val files = editorManager.selectedFiles
-
-            if (files.isNotEmpty()) {
-                val file = files[0]
-                val fileType = file.fileType.name
-                currentFileName = file.name
-//                println("Current file type: $fileType")
-            }
-        }
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val objectMapper = Gson()
-            val urlStr = "http://$server:1234/v1/chat/completions"
-            val url = URI.create(urlStr).toURL()
-            val connection = url.openConnection() as HttpURLConnection
-
-            connection.setRequestMethod("POST")
-            connection.setRequestProperty("Content-Type", "application/json")
-
-            connection.setDoOutput(true)
-            val os = connection.outputStream
-
-            val chatRequest = ChatRequest()
-            chatRequest.messages = (
-                    listOf(
-                        ChatRequest.Message(
-                            "system",
-                            systemPrompt.text
-                        ), ChatRequest.Message("user", "Проект: ${currentFileName}\n\n  ${prompt.text}")
-                    )
-                    )
-            chatRequest.stream = true
-            chatRequest.model =
-//                model
-                modelSelector.selectedItem as String
-
-
-            os.write(objectMapper.toJson(chatRequest).encodeToByteArray())
-            os.flush()
-
-            val flavour: MarkdownFlavourDescriptor = GFMFlavourDescriptor()
-            val parsedTree = MarkdownParser(flavour)
-
-
-            val responseCode = connection.getResponseCode()
-            if (responseCode == HttpStatus.SC_OK) {
-                val sb = StringBuilder()
-                var skipJumpingScroll = 0
-                BufferedReader(InputStreamReader(connection.inputStream)).use { reader ->
-                    var line: String?
-                    while (true) {
-                        line = reader.readLine()
-                        if (line == null || line.contains("[DONE]")) {
-                            ApplicationManager.getApplication().runReadAction {
-//                                val html = toHTML(parsedTree, sb, flavour)
-//                                editor.text = addCopy(html)
-                                scrollPane.verticalScrollBar.value = scrollPane.verticalScrollBar.maximum
-                            }
-                            break
-                        }
-                        val replace = line.replace("data: ", "")
-                        val chatResponse = objectMapper.fromJson(replace, ChatResponse::class.java)
-                        if (chatResponse?.choices != null && chatResponse.choices!!.isNotEmpty()) {
-                            if (chatResponse.choices!!.first().delta?.content != null) {
-                                sb.append(chatResponse.choices!!.first().delta?.content)
-
-                                val html = toHTML(parsedTree, sb, flavour)
-                                ApplicationManager.getApplication().runReadAction {
-                                    editor.text = html
-                                    skipJumpingScroll++
-                                    if (skipJumpingScroll > JUMP_SCROLL_SKIPS) {
-                                        skipJumpingScroll = 0
-                                        scrollPane.verticalScrollBar.value = scrollPane.verticalScrollBar.maximum
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-            }
-
-
-        }
-    }
-
-    private fun toHTML(
-        parsedTree: MarkdownParser,
-        sb: StringBuilder,
-        flavour: MarkdownFlavourDescriptor,
-    ): String {
-        val tree = parsedTree.buildMarkdownTreeFromString(sb.toString())
-        val html = (HtmlGenerator(sb.toString(), tree, flavour, false).generateHtml())
-        return html
-    }
-
-
-    init {
-        this.content = JPanel().apply {
-            systemPrompt = JTextField("Helpful Coding Assistant")
-            systemPrompt.toolTipText = "System Prompt"
-
-            modelSelector = JComboBox()
-            modelSelector.toolTipText = "Select AI Model"
-            fetchModels() // ✅ Загружаем список моделей из API
-
-            layout = GridLayout(2, 1)
-            prompt = JTextArea("")
-            prompt.lineWrap = true
-
-            editor = JTextPane()
-            val build = HTMLEditorKitBuilder().build()
-            editor.editorKit = build
-            chat = JButton("Ask")
-            chat.addActionListener {
-                if (prompt.text.isNotEmpty() && systemPrompt.text.isNotEmpty()) {
-                    editor.text = ""
-                    sendTextToEndpoint()
-                } else {
-                    JOptionPane.showMessageDialog(
-                        prompt,
-                        "Text area or system prompt is empty!",
-                        "Warning",
-                        JOptionPane.WARNING_MESSAGE
-                    )
-                }
-            }
-            val questionPanel = JPanel(BorderLayout())
-            questionPanel.add(JLabel("Chat with GPT"), BorderLayout.NORTH)
-            questionPanel.add(modelSelector, BorderLayout.NORTH)
-            questionPanel.add(
-                JBScrollPane(prompt, VERTICAL_SCROLLBAR_AS_NEEDED, HORIZONTAL_SCROLLBAR_NEVER),
-                BorderLayout.CENTER
-            )
-            questionPanel.add(systemPrompt, BorderLayout.SOUTH)
-            add(questionPanel)
-
-            val answerPanel = JPanel(BorderLayout())
-            answerPanel.add(chat, BorderLayout.NORTH)
-            scrollPane = JBScrollPane(editor, VERTICAL_SCROLLBAR_AS_NEEDED, HORIZONTAL_SCROLLBAR_NEVER)
-            answerPanel.add(scrollPane, BorderLayout.CENTER)
-            add(answerPanel)
-        }
-    }
-
 
     private fun fetchModels() {
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -208,18 +135,13 @@ class GPTChatWindow {
                 val url = URI.create("http://localhost:1234/v1/models").toURL()
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "GET"
-
-                val responseCode = connection.responseCode
-                if (responseCode == HttpURLConnection.HTTP_OK) {
+                if (connection.responseCode == HttpURLConnection.HTTP_OK) {
                     val reader = BufferedReader(InputStreamReader(connection.inputStream))
                     val response = reader.readText()
                     reader.close()
-
                     val objectMapper = Gson()
                     val jsonObject = objectMapper.fromJson(response, JsonObject::class.java)
-                    val models = jsonObject.getAsJsonArray("data")
-                        .mapNotNull { it.asJsonObject["id"]?.asString }
-
+                    val models = jsonObject.getAsJsonArray("data").mapNotNull { it.asJsonObject["id"]?.asString }
                     SwingUtilities.invokeLater {
                         modelSelector.removeAllItems()
                         models.forEach { modelSelector.addItem(it) }
@@ -229,5 +151,53 @@ class GPTChatWindow {
                 e.printStackTrace()
             }
         }
+    }
+
+    init {
+        content = JPanel(BorderLayout())
+        systemPrompt = JTextField("Helpful Coding Assistant").apply {
+            toolTipText = "System Prompt"
+        }
+        modelSelector = JComboBox<String>().apply {
+            toolTipText = "Select AI Model"
+            fetchModels()
+        }
+
+        prompt = JTextArea().apply {
+            lineWrap = true
+            border = BorderFactory.createLineBorder(Color.GRAY, 1, true)
+            font = Font("SansSerif", Font.PLAIN, 14)
+        }
+
+        chat = JButton("Ask").apply {
+            addActionListener { sendTextToEndpoint() }
+        }
+        stop = JButton("Stop").apply {
+            isEnabled = false
+            addActionListener { chatWorker?.cancel(true) }
+        }
+
+        val buttonPanel = JPanel(FlowLayout(FlowLayout.RIGHT)).apply {
+            add(chat)
+            add(stop)
+        }
+
+        val questionPanel = JPanel(BorderLayout()).apply {
+            add(JLabel("Chat with GPT"), BorderLayout.NORTH)
+            add(modelSelector, BorderLayout.NORTH)
+            add(JBScrollPane(prompt, javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER), BorderLayout.CENTER)
+            add(buttonPanel, BorderLayout.SOUTH)
+            add(systemPrompt, BorderLayout.SOUTH)
+        }
+
+        editor = JTextPane().apply {
+            editorKit = HTMLEditorKitBuilder().build()
+        }
+        scrollPane = JBScrollPane(editor, javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER)
+
+        content.add(questionPanel, BorderLayout.NORTH)
+        content.add(scrollPane, BorderLayout.CENTER)
+
+        setupKeyBindings()
     }
 }
